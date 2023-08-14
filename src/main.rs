@@ -2,6 +2,6 @@
 #![feature(iter_array_chunks)]
 
 mod dom;
-mod lzss;
+mod html;
 
 fn main() {}
