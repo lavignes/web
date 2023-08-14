@@ -58,6 +58,7 @@ struct Html<R> {
     stash: Result<Token, HtmlError>,
     open_elements: Vec<usize>,
     head_element: Option<usize>,
+    form_element: Option<usize>,
     text: String,
 }
 
@@ -72,6 +73,7 @@ impl<R: Read> Html<R> {
             stash,
             open_elements: Vec::new(),
             head_element: None,
+            form_element: None,
             text: String::new(),
         }
     }
@@ -98,7 +100,6 @@ impl<R: Read> Html<R> {
     }
 
     fn append_text(&mut self, c: char) {
-        self.text.push(c);
         self.lexer.dom.append_char(c);
         let element = self
             .lexer
@@ -109,12 +110,15 @@ impl<R: Read> Html<R> {
         if let Some(child) = element.child_indicies().last() {
             if let Some(child) = self.lexer.dom.get_node_id_by_index(child) {
                 if let Some(mut text) = self.lexer.dom.get_text_node_mut(child) {
+                    self.text.push(c);
                     text.set_text(&self.text);
                     return;
                 }
             }
         }
         // otherwise create a new child to store the text
+        self.text.clear();
+        self.text.push(c);
         self.lexer
             .dom
             .get_element_node_mut(*self.open_elements.last().unwrap())
@@ -315,12 +319,10 @@ impl<R: Read> Html<R> {
                     }
                     Token::Tag {
                         end: false, name, ..
-                    } if !self.node_name_in(name, &["head"]) => {
+                    } if self.node_name_in(name, &["head"]) => {
                         self.next()?;
                     }
-                    Token::Tag {
-                        end: true, name, ..
-                    } if !self.node_name_in(name, &["body", "html", "br"]) => {
+                    Token::Tag { end: true, .. } => {
                         self.next()?;
                     }
                     _ => {
@@ -368,7 +370,22 @@ impl<R: Read> Html<R> {
                     }
                     Token::Tag {
                         end: true, name, ..
-                    } if !self.node_name_in(name, &["body", "html", "br"]) => {
+                    } if self.node_name_in(name, &["body", "html", "br"]) => {
+                        self.insertion_mode = InsertionMode::InBody;
+                        // otherwise, create a fake body element
+                        let body = self.lexer.dom.insert_text("body");
+                        let element = {
+                            let mut root = self
+                                .lexer
+                                .dom
+                                .get_element_node_mut(*self.open_elements.last().unwrap())
+                                .unwrap();
+                            root.append_child_element(body, &[])
+                        };
+                        self.head_element = Some(body);
+                        self.open_elements.push(element);
+                    }
+                    Token::Tag { end: true, .. } => {
                         self.next()?;
                     }
                     _ => {
@@ -437,39 +454,238 @@ impl<R: Read> Html<R> {
                     }
                     Token::Tag {
                         end: true, name, ..
-                        // TODO: This is probably wrong. the spec splits these
-                    } if self.node_name_in(name, &["body", "html"]) => {
-                        self.insertion_mode = InsertionMode::AfterBody;
+                    } if self.node_name_in(name, &["body"]) => {
                         let body = self.lexer.dom.insert_text("body");
                         if !self.is_node_in_scope(body) {
                             self.next()?;
+                            continue;
                         }
+                        self.insertion_mode = InsertionMode::AfterBody;
+                        self.next()?;
                     }
-                    Token::Tag { end: false, name, .. } if self.node_name_in(name, &["address", "article", "aside", "blockquote", "center", "details", "dialog", "div", "dl", "fieldset", "figcaption", "figure", "footer", "header", "nav", "ol", "pre", "section", "summary", "ul"]) => {
+                    Token::Tag {
+                        end: true, name, ..
+                    } if self.node_name_in(name, &["html"]) => {
+                        let body = self.lexer.dom.insert_text("body");
+                        if !self.is_node_in_scope(body) {
+                            self.next()?;
+                            continue;
+                        }
+                        self.insertion_mode = InsertionMode::AfterBody;
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(
+                        name,
+                        &[
+                            "address",
+                            "article",
+                            "aside",
+                            "blockquote",
+                            "center",
+                            "details",
+                            "dialog",
+                            "div",
+                            "dl",
+                            "fieldset",
+                            "figcaption",
+                            "figure",
+                            "footer",
+                            "header",
+                            "nav",
+                            "ol",
+                            "p",
+                            "section",
+                            "summary",
+                            "ul",
+                        ],
+                    ) =>
+                    {
                         let p = self.lexer.dom.insert_text("p");
-                        if !self.is_node_in_button_scope(p) {
+                        if self.is_node_in_button_scope(p) {
                             self.close_p_node();
                         }
-                        let mut node = self.lexer.dom.get_element_node_mut(*self.open_elements.last().unwrap()).unwrap();
+                        let mut node = self
+                            .lexer
+                            .dom
+                            .get_element_node_mut(*self.open_elements.last().unwrap())
+                            .unwrap();
                         let node = node.append_child_element(name, &self.lexer.attrs);
                         self.open_elements.push(node);
+                        self.next()?;
                     }
                     Token::Tag {
                         end: false, name, ..
                     } if self.node_name_in(name, &["h1", "h2", "h3", "h4", "h5", "h6"]) => {
                         let p = self.lexer.dom.insert_text("p");
-                        if !self.is_node_in_button_scope(p) {
+                        if self.is_node_in_button_scope(p) {
                             self.close_p_node();
                         }
-                        let current= self.lexer.dom.get_element_node(*self.open_elements.last().unwrap()).unwrap();
+                        let current = self
+                            .lexer
+                            .dom
+                            .get_element_node(*self.open_elements.last().unwrap())
+                            .unwrap();
                         if current.name() == name {
                             self.open_elements.pop();
                         }
-                        let mut node = self.lexer.dom.get_element_node_mut(*self.open_elements.last().unwrap()).unwrap();
+                        let mut node = self
+                            .lexer
+                            .dom
+                            .get_element_node_mut(*self.open_elements.last().unwrap())
+                            .unwrap();
                         let node = node.append_child_element(name, &self.lexer.attrs);
                         self.open_elements.push(node);
+                        self.next()?;
                     }
-                    _ => todo!("???")
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(name, &["pre"]) => {
+                        let p = self.lexer.dom.insert_text("p");
+                        if self.is_node_in_button_scope(p) {
+                            self.close_p_node();
+                        }
+                        let mut node = self
+                            .lexer
+                            .dom
+                            .get_element_node_mut(*self.open_elements.last().unwrap())
+                            .unwrap();
+                        let node = node.append_child_element(name, &self.lexer.attrs);
+                        self.open_elements.push(node);
+                        self.next()?;
+                        if let Token::Char('\n') = self.peek()? {
+                            self.next()?;
+                        }
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(name, &["form"]) => {
+                        if self.form_element.is_some() {
+                            self.next()?;
+                            continue;
+                        }
+                        let p = self.lexer.dom.insert_text("p");
+                        if !self.is_node_in_button_scope(p) {
+                            self.close_p_node();
+                        }
+                        let mut node = self
+                            .lexer
+                            .dom
+                            .get_element_node_mut(*self.open_elements.last().unwrap())
+                            .unwrap();
+                        let node = node.append_child_element(name, &self.lexer.attrs);
+                        self.open_elements.push(node);
+                        self.form_element = Some(node);
+                        self.next()?;
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(name, &["li"]) => {
+                        todo!("li");
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(name, &["dd", "dt"]) => {
+                        todo!("dt dt");
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(name, &["button"]) => {
+                        todo!("button");
+                    }
+                    Token::Tag {
+                        end: true, name, ..
+                    } if self.node_name_in(
+                        name,
+                        &[
+                            "address",
+                            "article",
+                            "aside",
+                            "blockquote",
+                            "button",
+                            "center",
+                            "details",
+                            "dialog",
+                            "div",
+                            "dl",
+                            "fieldset",
+                            "figcaption",
+                            "figure",
+                            "footer",
+                            "header",
+                            "nav",
+                            "ol",
+                            "pre",
+                            "section",
+                            "summary",
+                            "ul",
+                        ],
+                    ) =>
+                    {
+                        if !self.is_node_in_scope(name) {
+                            self.next()?;
+                            continue;
+                        }
+                        self.close_implied_end_tags(&["dd", "dt", "li", "optgroup", "option", "p"]);
+                        while let Some(node) = self.open_elements.pop() {
+                            let node = self.lexer.dom.get_element_node(node).unwrap();
+                            if node.name() == name {
+                                break;
+                            }
+                        }
+                        self.next()?;
+                    }
+                    Token::Tag {
+                        end: true, name, ..
+                    } if self.node_name_in(name, &["form"]) => {
+                        todo!("form end");
+                    }
+                    Token::Tag {
+                        end: true, name, ..
+                    } if self.node_name_in(name, &["p"]) => {
+                        if !self.is_node_in_button_scope(name) {
+                            // otherwise, create a fake p element
+                            let mut current = self
+                                .lexer
+                                .dom
+                                .get_element_node_mut(*self.open_elements.last().unwrap())
+                                .unwrap();
+                            let p = current.append_child_element(name, &[]);
+                            self.open_elements.push(p);
+                        }
+                        self.close_p_node();
+                        self.next()?;
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } if self.node_name_in(
+                        name,
+                        &[
+                            "caption", "col", "colgroup", "head", "tbody", "td", "tfoot", "th",
+                            "thead", "tr",
+                        ],
+                    ) =>
+                    {
+                        self.next()?;
+                    }
+                    Token::Tag {
+                        end: false, name, ..
+                    } => {
+                        // TODO: reconstruct active formatting elements?
+                        let mut node = self
+                            .lexer
+                            .dom
+                            .get_element_node_mut(*self.open_elements.last().unwrap())
+                            .unwrap();
+                        let node = node.append_child_element(name, &self.lexer.attrs);
+                        self.open_elements.push(node);
+                        self.next()?;
+                    }
+                    Token::Tag {
+                        end: true, name, ..
+                    } => {
+                        todo!("other end tag");
+                    }
                 },
                 InsertionMode::AfterBody => match self.peek()? {
                     Token::Char(c @ '\t' | c @ '\n' | c @ '\x0C' | c @ ' ') => {

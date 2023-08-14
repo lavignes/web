@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn test() {
-    let reader = Cursor::new("test");
+    let reader = Cursor::new("<section><b>foo</p>hello world!");
     let dom = Dom::new();
     let mut html = Html::new(reader, dom);
     html.parse().unwrap();
