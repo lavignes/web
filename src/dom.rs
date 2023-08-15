@@ -74,7 +74,7 @@ impl Dom {
         // range 0 is always the empty range
         let mut ranges = Soup::new();
         let empty_range_index = ranges.append(&[EMPTY_RANGE]).start;
-        assert!(empty_range_index == EMPTY_RANGE_INDEX);
+        debug_assert!(empty_range_index == EMPTY_RANGE_INDEX);
 
         // node 0 is the root node
         let root = Node::Element(ElementNode {

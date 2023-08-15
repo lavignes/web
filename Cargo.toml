@@ -4,6 +4,20 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[profile.release]
+opt-level = "z"
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+incremental = false
+
 [dependencies]
+thiserror = "1"
+pin-project = "1"
+futures = "0.3"
+async-std = "1"
+
 minifb = "0.25"
-thiserror = "1.0"
