@@ -210,6 +210,16 @@ impl Dom {
         self.insert_range(range)
     }
 
+    pub fn insert_attrs(&mut self, attrs: &[[usize; 2]]) -> usize {
+        for attr in attrs {
+            self.attr_buf.push(*attr);
+        }
+        let start = self.attrs.len();
+        let end = start + self.attr_buf.len();
+        self.attrs.extend(self.attr_buf.drain(..));
+        self.insert_range(start..end)
+    }
+
     pub fn append_char(&mut self, c: char) {
         let mut buf = [0; 4];
         let string = c.encode_utf8(&mut buf);
@@ -342,13 +352,7 @@ impl<'a> ElementNodeHandleMut<'a> {
         }
 
         // add new child to temp storage
-        for attr in attrs {
-            self.dom.attr_buf.push(*attr);
-        }
-        let start = self.dom.attrs.len();
-        let end = start + self.dom.attr_buf.len();
-        self.dom.attrs.extend(self.dom.attr_buf.drain(..));
-        let attrs = self.dom.insert_range(start..end);
+        let attrs = self.dom.insert_attrs(attrs);
 
         self.dom.node_id_counter += 1;
         self.dom.node_buf.push(Node::Element(ElementNode {

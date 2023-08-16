@@ -13,13 +13,13 @@ pub trait NewlineNormalizedConsume {
 }
 
 pub trait NewlineNormalizable {
+    /// Turns an iterator of `char` into a `NewlineNormalized`.
     fn newline_normalized(self) -> NewlineNormalized<Self>
     where
         Self: Sized + Iterator;
 }
 
 impl<I: Iterator<Item = char>> NewlineNormalizable for I {
-    /// Turns an iterator of `char` into a `NewlineNormalized`.
     fn newline_normalized(self) -> NewlineNormalized<Self> {
         NewlineNormalized {
             inner: self.peekable(),

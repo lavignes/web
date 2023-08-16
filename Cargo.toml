@@ -18,9 +18,8 @@ incremental = false
 thiserror = "1"
 pin-project = "1"
 smol = "1"
-noop-waker = "0"
 
-minifb = "0.25"
+minifb = { version = "0.25", optional = true }
 
 [dev-dependencies]
 
