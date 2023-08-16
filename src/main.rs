@@ -10,6 +10,7 @@ mod html;
 mod io;
 
 fn main() {
+    smol::block_on(async {});
     //    let mut win = Window::new(
     //        "web",
     //        800,

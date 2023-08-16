@@ -17,7 +17,10 @@ incremental = false
 [dependencies]
 thiserror = "1"
 pin-project = "1"
-futures = "0.3"
-async-std = "1"
+smol = "1"
+noop-waker = "0"
 
 minifb = "0.25"
+
+[dev-dependencies]
+

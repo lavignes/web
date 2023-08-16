@@ -9,6 +9,9 @@ use crate::dom::{Dom, EMPTY_RANGE_INDEX, ROOT_NODE_ID};
 #[cfg(test)]
 mod tests;
 
+mod parser;
+mod tokenizer;
+
 #[derive(thiserror::Error, Debug, Clone)]
 #[error("{msg}")]
 struct HtmlError {

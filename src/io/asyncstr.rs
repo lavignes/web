@@ -5,10 +5,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{io::BufReader, AsyncBufRead, AsyncRead};
+use smol::io::{AsyncBufRead, AsyncRead, BufReader};
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum AsyncStrError {
+pub enum AsyncStrError {
     #[error(transparent)]
     IoError(#[from] io::Error),
 
@@ -17,7 +17,7 @@ pub(crate) enum AsyncStrError {
 }
 
 #[pin_project::pin_project]
-pub(crate) struct AsyncStrReader<R> {
+pub struct AsyncStrReader<R> {
     #[pin]
     inner: BufReader<R>,
 }
@@ -76,12 +76,13 @@ impl<R: AsyncRead + Unpin> AsyncStrReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use futures::{io::Cursor, task};
+    use smol::io::Cursor;
 
     use super::*;
+    use crate::io::noop_waker_ref;
 
     fn cx<'a>() -> Context<'a> {
-        Context::from_waker(task::noop_waker_ref())
+        Context::from_waker(noop_waker_ref())
     }
 
     fn assert_str<R: AsyncRead + Unpin>(
