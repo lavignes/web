@@ -16,6 +16,7 @@ pub enum AsyncStrError {
     Utf8Error(#[from] str::Utf8Error),
 }
 
+#[must_use]
 #[pin_project::pin_project]
 pub struct AsyncStrReader<R> {
     #[pin]

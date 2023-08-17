@@ -8,18 +8,11 @@ use smol::{
     stream::{Stream, StreamExt},
 };
 
-use super::tokenizer::{Interner, Tokenizer};
+use super::tokenizer::{Interner, Token, Tokenizer, TokenizerError};
 use crate::{
     dom::{Dom, EMPTY_RANGE_INDEX},
-    io::{Location, PeekableStream, PeekableStreamable},
+    io::{AsyncStrError, Location, PeekableStream, PeekableStreamable},
 };
-
-#[derive(thiserror::Error, Debug, Clone)]
-#[error("{msg}")]
-pub struct ParserError {
-    loc: Location,
-    msg: String,
-}
 
 #[derive(Copy, Clone)]
 enum InsertionMode {
@@ -33,11 +26,17 @@ enum InsertionMode {
     AfterAfterBody,
 }
 
-#[pin_project::pin_project(project = ProjectedParser)]
+struct ParserInner {
+    insertion_mode: InsertionMode,
+    tok_buf: Vec<(Location, Token)>,
+}
+
+#[must_use]
+#[pin_project::pin_project]
 pub struct Parser<R: AsyncRead + Unpin> {
     #[pin]
-    tokenizer: PeekableStream<Tokenizer<R, Dom>>,
-    shoes: String,
+    tokenizer: Tokenizer<R>,
+    inner: ParserInner,
 }
 
 impl Interner for Dom {
@@ -51,21 +50,62 @@ impl Interner for Dom {
 }
 
 pub enum ParseEvent {
+    Fatal(Location, ()),
     Title, // TODO: fire off title when we have it
     Link,  // TODO: need to fire off when a link tag is ready to fetch
     Style, // TODO: style tag contents are ready to parse
 }
 
-impl<'a, R: AsyncRead + Unpin> ProjectedParser<'a, R> {
-    fn parse_next(self, cx: &mut Context<'_>) -> Poll<Option<Result<ParseEvent, ParserError>>> {
-        self.tokenizer.get_mut().poll_next(cx);
-        Poll::Ready(None)
+/*
+impl<R: AsyncRead + Unpin> Parser<R> {
+    fn peek(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<(Location, Token)>, (Location, TokenizerError)>> {
+        let pin = Pin::new(&mut self.tokenizer);
+        pin.poll_peek(cx).ready()?.map_or_else(
+            || Poll::Ready(Ok(None)),
+            |pair| match pair {
+                (loc, Ok(tok)) => Poll::Ready(Ok(Some((loc, tok)))),
+                (loc, Err(err)) => Poll::Ready(Err((loc, err))),
+            },
+        )
     }
 }
 
-impl<R: AsyncRead + Unpin> Stream for Parser<R> {
-    type Item = Result<ParseEvent, ParserError>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.project().parse_next(cx)
+impl ParserInner {
+    fn next(&mut self, dom: &mut Dom) -> Poll<Option<ParseEvent>> {
+        loop {
+            match self.insertion_mode {}
+        }
     }
 }
+*/
+
+impl<R: AsyncRead + Unpin> Parser<R> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>, dom: &mut Dom) -> Poll<Option<ParseEvent>> {
+        let this = self.project();
+
+        this.inner.next(this.tokenizer)
+
+        /*
+        loop {
+            match this.insertion_mode {
+                InsertionMode::Initial => match peek!(this, cx)? {
+                    Err((loc, _)) => return Poll::Ready(Some(ParseEvent::Fatal(loc, ()))),
+                    Ok(Some((_, Token::Comment | Token::Char('\t' | '\n' | '\x0C' | ' ')))) => {
+                        next!(this, cx)?;
+                    }
+                    Ok(Some((_, Token::DocType))) => todo!("doctype"),
+                    _ => {
+                        *this.insertion_mode = InsertionMode::BeforeHtml;
+                    }
+                },
+
+                _ => todo!(),
+            }
+        }
+        */
+    }
+}
+*/

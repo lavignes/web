@@ -37,6 +37,7 @@ pub fn noop_waker_ref() -> &'static Waker {
     unsafe { &*(&NOOP_WAKER_INSTANCE.0 as *const RawWaker as *const Waker) }
 }
 
+#[must_use]
 #[pin_project::pin_project]
 pub struct PeekableStream<S: Stream> {
     #[pin]
@@ -45,7 +46,7 @@ pub struct PeekableStream<S: Stream> {
 }
 
 impl<S: Stream> PeekableStream<S> {
-    pub fn peek(self: Pin<&mut Self>, cx: &mut Context<'_>) -> &Poll<Option<S::Item>> {
+    pub fn poll_peek(self: Pin<&mut Self>, cx: &mut Context<'_>) -> &Poll<Option<S::Item>> {
         let this = self.project();
         this.peeked.get_or_insert_with(|| this.inner.poll_next(cx))
     }

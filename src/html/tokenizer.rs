@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use smol::{io::AsyncRead, stream::Stream};
+use smol::io::AsyncRead;
 
 use crate::io::{AsyncStrError, AsyncStrReader, Location, NewlineNormalizable};
 
@@ -68,9 +68,8 @@ pub trait Interner {
     fn intern_attrs(&mut self, attrs: &[[usize; 2]]) -> usize;
 }
 
-struct TokenizerInner<I> {
+struct TokenizerInner {
     consumed: usize,
-    interner: I,
     state: State,
     str_buf: String,
     attr_buf: Vec<[usize; 2]>,
@@ -82,18 +81,18 @@ struct TokenizerInner<I> {
     loc: Location,
 }
 
+#[must_use]
 #[pin_project::pin_project]
-pub struct Tokenizer<R, I> {
+pub struct Tokenizer<R> {
     #[pin]
     reader: AsyncStrReader<R>,
-    inner: TokenizerInner<I>,
+    inner: TokenizerInner,
 }
 
-impl<R, I> Tokenizer<R, I> {
-    pub fn new(reader: AsyncStrReader<R>, interner: I) -> Self {
+impl<R> Tokenizer<R> {
+    pub fn new(reader: AsyncStrReader<R>) -> Self {
         let inner = TokenizerInner {
             consumed: 0,
-            interner,
             state: State::Data,
             str_buf: String::new(),
             attr_buf: Vec::new(),
@@ -110,7 +109,7 @@ impl<R, I> Tokenizer<R, I> {
 
 type TokenzizerItem = (Location, Result<Token, TokenizerError>);
 
-impl<I: Interner> TokenizerInner<I> {
+impl TokenizerInner {
     fn token(&mut self, loc: Location, tok: Token) -> Poll<Option<TokenzizerItem>> {
         Poll::Ready(Some((loc, Ok(tok))))
     }
@@ -119,14 +118,14 @@ impl<I: Interner> TokenizerInner<I> {
         self.token(self.loc, tok)
     }
 
-    fn set_tag_name_if_unset(&mut self) {
+    fn set_tag_name_if_unset<I: Interner>(&mut self, int: &mut I) {
         self.tok = match self.tok {
             Token::StartTag {
                 name,
                 attrs,
                 self_closing,
             } if name == I::EMPTY_RANGE_INDEX => {
-                let name = self.interner.intern_str(&self.str_buf);
+                let name = int.intern_str(&self.str_buf);
                 Token::StartTag {
                     name,
                     attrs,
@@ -134,21 +133,21 @@ impl<I: Interner> TokenizerInner<I> {
                 }
             }
             Token::EndTag { name, attrs } if name == I::EMPTY_RANGE_INDEX => {
-                let name = self.interner.intern_str(&self.str_buf);
+                let name = int.intern_str(&self.str_buf);
                 Token::EndTag { name, attrs }
             }
             tok => tok,
         }
     }
 
-    fn set_tag_attrs_if_unset(&mut self) {
+    fn set_tag_attrs_if_unset<I: Interner>(&mut self, int: &mut I) {
         self.tok = match self.tok {
             Token::StartTag {
                 name,
                 attrs,
                 self_closing,
             } if attrs == I::EMPTY_RANGE_INDEX => {
-                let attrs = self.interner.intern_attrs(&self.attr_buf);
+                let attrs = int.intern_attrs(&self.attr_buf);
                 Token::StartTag {
                     name,
                     attrs,
@@ -156,7 +155,7 @@ impl<I: Interner> TokenizerInner<I> {
                 }
             }
             Token::EndTag { name, attrs } if attrs == I::EMPTY_RANGE_INDEX => {
-                let attrs = self.interner.intern_attrs(&self.attr_buf);
+                let attrs = int.intern_attrs(&self.attr_buf);
                 Token::EndTag { name, attrs }
             }
             tok => tok,
@@ -178,7 +177,7 @@ impl<I: Interner> TokenizerInner<I> {
         }
     }
 
-    fn next(&mut self, input: &str) -> Poll<Option<TokenzizerItem>> {
+    fn next<I: Interner>(&mut self, input: &str, int: &mut I) -> Poll<Option<TokenzizerItem>> {
         let mut chars = input.chars().newline_normalized().peekable();
         loop {
             let c = chars.peek().map(|(_, c)| *c);
@@ -263,7 +262,7 @@ impl<I: Interner> TokenizerInner<I> {
                     Some('\t' | '\n' | '\x0C' | ' ') => {
                         self.consume(&mut chars);
                         self.state = State::BeforeAttributeName;
-                        self.set_tag_name_if_unset();
+                        self.set_tag_name_if_unset(int);
                     }
                     Some('/') => {
                         self.consume(&mut chars);
@@ -272,8 +271,8 @@ impl<I: Interner> TokenizerInner<I> {
                     Some('>') => {
                         self.consume(&mut chars);
                         self.state = State::Data;
-                        self.set_tag_name_if_unset();
-                        self.set_tag_attrs_if_unset();
+                        self.set_tag_name_if_unset(int);
+                        self.set_tag_attrs_if_unset(int);
                         self.attr_buf.clear();
                         return self.token(self.start_loc, self.tok);
                     }
@@ -318,13 +317,13 @@ impl<I: Interner> TokenizerInner<I> {
                 },
                 State::AttributeName => match c {
                     None | Some('\t' | '\n' | '\x0C' | ' ' | '/' | '>') => {
-                        let name = self.interner.intern_str(&self.str_buf);
+                        let name = int.intern_str(&self.str_buf);
                         self.attr_buf.last_mut().unwrap()[0] = name;
                         self.state = State::AfterAttributeName;
                     }
                     Some('=') => {
                         self.consume(&mut chars);
-                        let name = self.interner.intern_str(&self.str_buf);
+                        let name = int.intern_str(&self.str_buf);
                         self.attr_buf.last_mut().unwrap()[0] = name;
                         self.state = State::BeforeAttributeValue;
                     }
@@ -388,7 +387,7 @@ impl<I: Interner> TokenizerInner<I> {
                     Some('>') => {
                         // error: missing-attribute-value
                         self.consume(&mut chars);
-                        self.set_tag_attrs_if_unset();
+                        self.set_tag_attrs_if_unset(int);
                         self.attr_buf.clear();
                         self.state = State::Data;
                         return self.token(self.start_loc, self.tok);
@@ -401,7 +400,7 @@ impl<I: Interner> TokenizerInner<I> {
                 State::AttributeValueDoubleQuote => match c {
                     Some('"') => {
                         self.consume(&mut chars);
-                        let value = self.interner.intern_str(&self.str_buf);
+                        let value = int.intern_str(&self.str_buf);
                         self.attr_buf.last_mut().unwrap()[1] = value;
                         self.state = State::AfterAttributeValueQuoted;
                     }
@@ -423,7 +422,7 @@ impl<I: Interner> TokenizerInner<I> {
                 State::AttributeValueSingleQuote => match c {
                     Some('\'') => {
                         self.consume(&mut chars);
-                        let value = self.interner.intern_str(&self.str_buf);
+                        let value = int.intern_str(&self.str_buf);
                         self.attr_buf.last_mut().unwrap()[1] = value;
                         self.state = State::AfterAttributeValueQuoted;
                     }
@@ -445,16 +444,16 @@ impl<I: Interner> TokenizerInner<I> {
                 State::AttributeValueNoQuote => match c {
                     Some('\t' | '\n' | '\x0C' | ' ') => {
                         self.consume(&mut chars);
-                        let value = self.interner.intern_str(&self.str_buf);
+                        let value = int.intern_str(&self.str_buf);
                         self.attr_buf.last_mut().unwrap()[1] = value;
                         self.state = State::BeforeAttributeName;
                     }
                     Some('&') => todo!("char reference state"),
                     Some('>') => {
                         self.consume(&mut chars);
-                        let value = self.interner.intern_str(&self.str_buf);
+                        let value = int.intern_str(&self.str_buf);
                         self.attr_buf.last_mut().unwrap()[1] = value;
-                        self.set_tag_attrs_if_unset();
+                        self.set_tag_attrs_if_unset(int);
                         self.attr_buf.clear();
                         self.state = State::Data;
                         return self.token(self.start_loc, self.tok);
@@ -490,7 +489,7 @@ impl<I: Interner> TokenizerInner<I> {
                     Some('>') => {
                         self.consume(&mut chars);
                         self.state = State::Data;
-                        self.set_tag_attrs_if_unset();
+                        self.set_tag_attrs_if_unset(int);
                         self.attr_buf.clear();
                         return self.token(self.start_loc, self.tok);
                     }
@@ -506,8 +505,8 @@ impl<I: Interner> TokenizerInner<I> {
                 State::SelfClosingStartTag => match c {
                     Some('>') => {
                         self.consume(&mut chars);
-                        self.set_tag_name_if_unset();
-                        self.set_tag_attrs_if_unset();
+                        self.set_tag_name_if_unset(int);
+                        self.set_tag_attrs_if_unset(int);
                         self.attr_buf.clear();
                         self.state = State::Data;
                         if let Token::StartTag { name, attrs, .. } = self.tok {
@@ -537,10 +536,12 @@ impl<I: Interner> TokenizerInner<I> {
     }
 }
 
-impl<R: AsyncRead + Unpin, I: Interner> Stream for Tokenizer<R, I> {
-    type Item = TokenzizerItem;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+impl<R: AsyncRead + Unpin> Tokenizer<R> {
+    fn poll_next<I: Interner>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        int: &mut I,
+    ) -> Poll<Option<TokenzizerItem>> {
         let mut this = self.project();
         if let Some((loc, tok)) = this.inner.synthetic_toks.pop() {
             return Poll::Ready(Some((loc, Ok(tok))));
@@ -561,7 +562,7 @@ impl<R: AsyncRead + Unpin, I: Interner> Stream for Tokenizer<R, I> {
                 }
             }
         };
-        match this.inner.next(input) {
+        match this.inner.next(input, int) {
             Poll::Ready(item) => {
                 this.reader.consume(this.inner.consumed);
                 this.inner.consumed = 0;
@@ -624,28 +625,34 @@ mod tests {
 
     fn assert_none<R: AsyncRead + Unpin, I: Interner>(
         cx: &mut Context<'_>,
-        tokenizer: &mut Tokenizer<R, I>,
+        tokenizer: &mut Tokenizer<R>,
+        int: &mut I,
     ) {
         assert!(matches!(
-            Pin::new(tokenizer).poll_next(cx),
+            Pin::new(tokenizer).poll_next(cx, int),
             Poll::Ready(None)
         ));
     }
 
     fn assert_pending<R: AsyncRead + Unpin, I: Interner>(
         cx: &mut Context<'_>,
-        tokenizer: &mut Tokenizer<R, I>,
+        tokenizer: &mut Tokenizer<R>,
+        int: &mut I,
     ) {
-        assert!(matches!(Pin::new(tokenizer).poll_next(cx), Poll::Pending));
+        assert!(matches!(
+            Pin::new(tokenizer).poll_next(cx, int),
+            Poll::Pending
+        ));
     }
 
     fn assert_token<R: AsyncRead + Unpin, I: Interner, L: Into<Location>>(
         cx: &mut Context<'_>,
-        tokenizer: &mut Tokenizer<R, I>,
+        tokenizer: &mut Tokenizer<R>,
+        int: &mut I,
         loc: L,
         tok: Token,
     ) {
-        let result = Pin::new(tokenizer).poll_next(cx);
+        let result = Pin::new(tokenizer).poll_next(cx, int);
         assert!(matches!(result, Poll::Ready(Some((_, Ok(_))))));
         if let Poll::Ready(Some((location, Ok(token)))) = result {
             assert_eq!(loc.into(), location);
@@ -667,33 +674,34 @@ mod tests {
     #[test]
     fn empty() {
         let buf = AsyncStrReader::new(Cursor::new(""));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn char() {
         let buf = AsyncStrReader::new(Cursor::new("abc"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_token(&mut cx, &mut tok, [1, 1], Token::Char('a'));
-        assert_token(&mut cx, &mut tok, [1, 2], Token::Char('b'));
-        assert_token(&mut cx, &mut tok, [1, 3], Token::Char('c'));
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_token(&mut cx, &mut tok, &mut int, [1, 1], Token::Char('a'));
+        assert_token(&mut cx, &mut tok, &mut int, [1, 2], Token::Char('b'));
+        assert_token(&mut cx, &mut tok, &mut int, [1, 3], Token::Char('c'));
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn start_tag() {
         let buf = AsyncStrReader::new(Cursor::new("<hello>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -701,38 +709,40 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "hello", 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "hello", 1);
     }
 
     #[test]
     fn end_tag() {
         let buf = AsyncStrReader::new(Cursor::new("</hello>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::EndTag {
                 name: 1,
                 attrs: MockInterner::EMPTY_RANGE_INDEX,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "hello", 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "hello", 1);
     }
 
     #[test]
     fn self_closing_tag() {
         let buf = AsyncStrReader::new(Cursor::new("<hello/>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -740,8 +750,8 @@ mod tests {
                 self_closing: true,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "hello", 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "hello", 1);
     }
 
     #[test]
@@ -749,12 +759,13 @@ mod tests {
         let buf = AsyncStrReader::new(Cursor::new(
             "<hello key='test'><hello key=\"test\"><hello key=test>",
         ));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -765,6 +776,7 @@ mod tests {
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 19],
             Token::StartTag {
                 name: 1,
@@ -775,6 +787,7 @@ mod tests {
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 37],
             Token::StartTag {
                 name: 1,
@@ -782,75 +795,76 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "hello", 1);
-        assert_attrs(&tok.inner.interner, &[["key", "test"]], 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "hello", 1);
+        assert_attrs(&mut int, &[["key", "test"]], 1);
     }
 
     #[test]
     fn error_unexpected_null() {
         let buf = AsyncStrReader::new(Cursor::new("\x00"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_token(&mut cx, &mut tok, [1, 1], Token::Char('\x00'));
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_token(&mut cx, &mut tok, &mut int, [1, 1], Token::Char('\x00'));
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_eof_before_tag_name() {
         let buf = AsyncStrReader::new(Cursor::new("<"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_token(&mut cx, &mut tok, [1, 1], Token::Char('<'));
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_token(&mut cx, &mut tok, &mut int, [1, 1], Token::Char('<'));
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_invalid_first_character_of_tag_name() {
         let buf = AsyncStrReader::new(Cursor::new("<3>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_token(&mut cx, &mut tok, [1, 1], Token::Char('<'));
-        assert_token(&mut cx, &mut tok, [1, 2], Token::Char('3'));
-        assert_token(&mut cx, &mut tok, [1, 3], Token::Char('>'));
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_token(&mut cx, &mut tok, &mut int, [1, 1], Token::Char('<'));
+        assert_token(&mut cx, &mut tok, &mut int, [1, 2], Token::Char('3'));
+        assert_token(&mut cx, &mut tok, &mut int, [1, 3], Token::Char('>'));
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_missing_end_tag_name() {
         let buf = AsyncStrReader::new(Cursor::new("</>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_eof_before_tag_name_2() {
         let buf = AsyncStrReader::new(Cursor::new("</"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_token(&mut cx, &mut tok, [1, 1], Token::Char('<'));
-        assert_token(&mut cx, &mut tok, [1, 2], Token::Char('/'));
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_token(&mut cx, &mut tok, &mut int, [1, 1], Token::Char('<'));
+        assert_token(&mut cx, &mut tok, &mut int, [1, 2], Token::Char('/'));
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_unexpected_null_2() {
         let buf = AsyncStrReader::new(Cursor::new("<test\x00>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -858,29 +872,30 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test�", 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test�", 1);
     }
 
     #[test]
     fn error_eof_in_tag() {
         let buf = AsyncStrReader::new(Cursor::new("<t"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_unexpected_equals_sign_before_attribute_name() {
         let buf = AsyncStrReader::new(Cursor::new("<test ==foo>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -888,20 +903,21 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test", 1);
-        assert_attrs(&tok.inner.interner, &[["=", "foo"]], 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test", 1);
+        assert_attrs(&mut int, &[["=", "foo"]], 1);
     }
 
     #[test]
     fn error_unexpected_character_in_attribute_name() {
         let buf = AsyncStrReader::new(Cursor::new("<test \"'<=foo>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -909,30 +925,31 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test", 1);
-        assert_attrs(&tok.inner.interner, &[["\"'<", "foo"]], 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test", 1);
+        assert_attrs(&mut int, &[["\"'<", "foo"]], 1);
     }
 
     #[test]
     fn error_eof_in_tag_2() {
         let buf = AsyncStrReader::new(Cursor::new("<test foo="));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_missing_attribute_value() {
         let buf = AsyncStrReader::new(Cursor::new("<test foo=>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -940,20 +957,21 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test", 1);
-        assert_attrs(&tok.inner.interner, &[["foo", ""]], 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test", 1);
+        assert_attrs(&mut int, &[["foo", ""]], 1);
     }
 
     #[test]
     fn error_unexpected_null_3() {
         let buf = AsyncStrReader::new(Cursor::new("<test foo=\"\x00\">"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -961,30 +979,31 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test", 1);
-        assert_attrs(&tok.inner.interner, &[["foo", "�"]], 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test", 1);
+        assert_attrs(&mut int, &[["foo", "�"]], 1);
     }
 
     #[test]
     fn error_eof_in_tag_3() {
         let buf = AsyncStrReader::new(Cursor::new("<test foo=\""));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_missing_whitespace_between_attributes() {
         let buf = AsyncStrReader::new(Cursor::new("<test foo=\"bar\"bar=\"baz\">"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -992,30 +1011,31 @@ mod tests {
                 self_closing: false,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test", 1);
-        assert_attrs(&tok.inner.interner, &[["foo", "bar"], ["bar", "baz"]], 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test", 1);
+        assert_attrs(&mut int, &[["foo", "bar"], ["bar", "baz"]], 1);
     }
 
     #[test]
     fn error_eof_in_tag_4() {
         let buf = AsyncStrReader::new(Cursor::new("</test"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
-        assert_pending(&mut cx, &mut tok);
-        assert_none(&mut cx, &mut tok);
+        let mut tok = Tokenizer::new(buf);
+        assert_pending(&mut cx, &mut tok, &mut int);
+        assert_none(&mut cx, &mut tok, &mut int);
     }
 
     #[test]
     fn error_unexpected_solidus_in_tag() {
         let buf = AsyncStrReader::new(Cursor::new("<test//>"));
-        let int = MockInterner::new();
+        let mut int = MockInterner::new();
         let mut cx = cx();
-        let mut tok = Tokenizer::new(buf, int);
+        let mut tok = Tokenizer::new(buf);
         assert_token(
             &mut cx,
             &mut tok,
+            &mut int,
             [1, 1],
             Token::StartTag {
                 name: 1,
@@ -1023,7 +1043,7 @@ mod tests {
                 self_closing: true,
             },
         );
-        assert_none(&mut cx, &mut tok);
-        assert_str(&tok.inner.interner, "test", 1);
+        assert_none(&mut cx, &mut tok, &mut int);
+        assert_str(&mut int, "test", 1);
     }
 }
