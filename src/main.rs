@@ -9,6 +9,7 @@ use std::{future, path::PathBuf, pin::Pin};
 
 use clap::Parser;
 use dom::Dom;
+use html::ParseEvent;
 use io::AsyncStrReader;
 use smol::fs::File;
 
@@ -33,7 +34,15 @@ fn main() -> std::io::Result<()> {
         let file = File::open(args.location.unwrap()).await?;
         let reader = AsyncStrReader::new(file);
         let mut parser = html::Parser::new(reader);
-        future::poll_fn(|cx| Pin::new(&mut parser).poll_next(cx, &mut dom)).await;
+        loop {
+            match future::poll_fn(|cx| Pin::new(&mut parser).poll_next(cx, &mut dom)).await {
+                ParseEvent::Done => break,
+                ParseEvent::Fatal(_, err) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, err))
+                }
+                _ => {}
+            }
+        }
         dom.write_tree(&mut std::io::stdout())?;
         Ok(())
     })
