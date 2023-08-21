@@ -80,10 +80,10 @@ mod tests {
     use smol::io::Cursor;
 
     use super::*;
-    use crate::io::noop_waker_ref;
+    use crate::asyncro;
 
     fn cx<'a>() -> Context<'a> {
-        Context::from_waker(noop_waker_ref())
+        Context::from_waker(asyncro::noop_waker_ref())
     }
 
     fn assert_str<R: AsyncRead + Unpin>(

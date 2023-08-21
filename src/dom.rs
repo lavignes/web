@@ -107,7 +107,7 @@ impl Dom {
         self.nodes.get(index).map(|node| node.id())
     }
 
-    pub fn get_text_node_by_id(&self, id: usize) -> Option<TextNodeHandle> {
+    pub fn get_text_node(&self, id: usize) -> Option<TextNodeHandle> {
         if let Some((index, Node::Text(node))) = self.get_node_by_id(id) {
             return Some(TextNodeHandle {
                 dom: self,
@@ -156,8 +156,8 @@ impl Dom {
         name: &str,
         value: &str,
     ) -> Option<ElementNodeHandle> {
-        let name = self.insert_text(name);
-        let value = self.insert_text(value);
+        let name = self.insert_str(name);
+        let value = self.insert_str(value);
         for (index, node) in self.nodes.iter().enumerate() {
             if !node.is_valid() {
                 continue;
@@ -183,8 +183,8 @@ impl Dom {
         name: &str,
         value: &str,
     ) -> Option<ElementNodeHandleMut> {
-        let name = self.insert_text(name);
-        let value = self.insert_text(value);
+        let name = self.insert_str(name);
+        let value = self.insert_str(value);
         for (index, node) in self.nodes.iter().enumerate() {
             if !node.is_valid() {
                 continue;
@@ -205,7 +205,7 @@ impl Dom {
         None
     }
 
-    pub fn insert_text(&mut self, text: &str) -> usize {
+    pub fn insert_str(&mut self, text: &str) -> usize {
         let range = self.text.append(text);
         self.insert_range(range)
     }
@@ -226,18 +226,18 @@ impl Dom {
         self.text.items.extend_from_slice(string.as_bytes())
     }
 
-    pub fn get_text(&self, index: usize) -> Option<&str> {
+    pub fn get_str(&self, index: usize) -> Option<&str> {
         self.ranges
             .items
             .get(index)
-            .map(|range| self.range_to_text(range.clone()))
+            .map(|range| self.range_to_str(range.clone()))
     }
 
-    fn range_to_text(&self, range: Range<usize>) -> &str {
+    fn range_to_str(&self, range: Range<usize>) -> &str {
         unsafe { str::from_utf8_unchecked(&self.text.items[range]) }
     }
 
-    pub fn find_text(&self, text: &str) -> Option<usize> {
+    pub fn find_str(&self, text: &str) -> Option<usize> {
         if let Some(range) = self.text.find(text) {
             return self.ranges.find(&[range]).map(|range| range.start);
         }
@@ -250,33 +250,55 @@ impl Dom {
 
     pub fn write_tree(&self, writer: &mut dyn Write) -> io::Result<()> {
         let node = self.nodes[ROOT_NODE_INDEX].clone();
-        self.write_node(0, node, writer)
+        self.write_node(0, node, writer, false)
     }
 
     pub fn write_junk(&self, writer: &mut dyn Write) -> io::Result<()> {
         for node in &self.nodes {
             if !node.is_valid() {
-                self.write_node(0, node.clone(), writer)?;
+                self.write_node(0, node.clone(), writer, false)?;
             }
         }
         Ok(())
     }
 
-    fn write_node(&self, depth: usize, node: Node, writer: &mut dyn Write) -> io::Result<()> {
+    fn write_node(
+        &self,
+        depth: usize,
+        node: Node,
+        writer: &mut dyn Write,
+        show_ids: bool,
+    ) -> io::Result<()> {
         for _ in 0..depth {
             write!(writer, " ")?;
         }
         match node {
             Node::Text(node) => {
-                let text = self.range_to_text(node.range);
-                writeln!(writer, "<:{id}>{text}", id = node.id)?;
+                let text = self.range_to_str(node.range);
+                if show_ids {
+                    writeln!(writer, "<:{id}>{text}", id = node.id)?;
+                } else {
+                    writeln!(writer, "<>{text}")?;
+                }
             }
             Node::Element(node) => {
-                let name = self.get_text(node.name).unwrap();
-                writeln!(writer, "<{name}:{id}>", id = node.id)?;
+                let name = self.get_str(node.name).unwrap();
+                if show_ids {
+                    write!(writer, "<{name}:{id}", id = node.id)?;
+                } else {
+                    write!(writer, "<{name}")?;
+                }
+                let attrs = self.ranges.items[node.attrs].clone();
+                let attrs = &self.attrs[attrs];
+                for attr in attrs {
+                    let name = self.get_str(attr[0]).unwrap();
+                    let value = self.get_str(attr[1]).unwrap();
+                    write!(writer, " {name}=\"{value}\"")?;
+                }
+                writeln!(writer, ">")?;
                 let kids = self.ranges.items[node.kids].clone();
                 for kid in &self.nodes[kids] {
-                    self.write_node(depth + 2, kid.clone(), writer)?;
+                    self.write_node(depth + 2, kid.clone(), writer, show_ids)?;
                 }
             }
         }
@@ -288,6 +310,12 @@ pub struct TextNodeHandle<'a> {
     dom: &'a Dom,
     index: usize,
     node: TextNode,
+}
+
+impl<'a> TextNodeHandle<'a> {
+    pub fn text(&self) -> &str {
+        self.dom.range_to_str(self.node.range.clone())
+    }
 }
 
 pub struct TextNodeHandleMut<'a> {
@@ -319,7 +347,7 @@ pub struct ElementNodeHandle<'a> {
 }
 
 impl<'a> ElementNodeHandle<'a> {
-    pub fn child_indicies(&self) -> Range<usize> {
+    pub fn child_indices(&self) -> Range<usize> {
         self.dom.ranges.items[self.node.kids].clone()
     }
 
@@ -339,8 +367,46 @@ impl<'a> ElementNodeHandleMut<'a> {
         self.dom.ranges.items[self.node.kids].clone()
     }
 
+    pub fn name(&self) -> usize {
+        self.node.name
+    }
+
     /// returns id of appended node
-    pub fn append_child_element(&mut self, name: usize, attrs: &[[usize; 2]]) -> usize {
+    pub fn append_child_element(&mut self, name: usize, attrs: usize) -> usize {
+        // sibling nodes *must* be contiguous in memory,
+        // so we will copy the children into temp storage
+        // TODO: sibling block freelist
+        let kids = self.dom.ranges.items[self.node.kids].clone();
+        for kid in &mut self.dom.nodes[kids] {
+            self.dom.node_buf.push(kid.clone());
+            // invalidate child
+            kid.invalidate();
+        }
+
+        self.dom.node_id_counter += 1;
+        self.dom.node_buf.push(Node::Element(ElementNode {
+            id: self.dom.node_id_counter,
+            name,
+            attrs,
+            kids: EMPTY_RANGE_INDEX,
+        }));
+
+        // copy all the childen back into nodes
+        let start = self.dom.nodes.len();
+        let end = start + self.dom.node_buf.len();
+        self.dom.nodes.extend(self.dom.node_buf.drain(..));
+        let kids = self.dom.insert_range(start..end);
+
+        // update the parent node to new children
+        let node = ElementNode { kids, ..self.node };
+        self.node = node;
+        self.dom.nodes[self.index] = Node::Element(node);
+
+        self.dom.node_id_counter
+    }
+
+    /// returns id of appended node
+    pub fn append_child_element_old(&mut self, name: usize, attrs: &[[usize; 2]]) -> usize {
         // sibling nodes *must* be contiguous in memory,
         // so we will copy the children into temp storage
         // TODO: sibling block freelist
@@ -411,8 +477,50 @@ impl<'a> ElementNodeHandleMut<'a> {
     }
 
     /// returns possibly updated index of attrs for node
+    pub fn insert_missing_attrs(&mut self, attrs: usize) -> usize {
+        let attrs = self.dom.ranges.items[attrs].clone();
+        if attrs.is_empty() {
+            return self.node.attrs;
+        }
+
+        // like sibling nodes, attrs *must* be contiguous in memory
+        // we'll copy them into temp storage
+        // TODO: attr block freelist
+        let old_attrs = self.dom.ranges.items[self.node.attrs].clone();
+        self.dom
+            .attr_buf
+            .extend_from_slice(&self.dom.attrs[old_attrs]);
+
+        // add only new attrs, leave existing ones unchanged
+        for [name, value] in &self.dom.attrs[attrs] {
+            if self
+                .dom
+                .attr_buf
+                .iter()
+                .find(|[k, _]| *k == *name)
+                .is_none()
+            {
+                self.dom.attr_buf.push([*name, *value]);
+            }
+        }
+
+        // copy all the ranges back in
+        let start = self.dom.attrs.len();
+        let end = start + self.dom.attr_buf.len();
+        self.dom.attrs.extend(self.dom.attr_buf.drain(..));
+        let attrs = self.dom.insert_range(start..end);
+
+        // update the node
+        let node = ElementNode { attrs, ..self.node };
+        self.node = node;
+        self.dom.nodes[self.index] = Node::Element(node);
+
+        attrs
+    }
+
+    /// returns possibly updated index of attrs for node
     // TODO: I don't even think I need to add attributes
-    fn insert_attribute(&mut self, name: &str, value: &str) -> usize {
+    fn insert_attr(&mut self, name: &str, value: &str) -> usize {
         // like sibling nodes, attrs *must* be contiguous in memory
         // we'll copy them into temp storage
         // TODO: attr block freelist
@@ -420,8 +528,8 @@ impl<'a> ElementNodeHandleMut<'a> {
         self.dom.attr_buf.extend_from_slice(&self.dom.attrs[attrs]);
 
         // add new attr (updating if it already exists)
-        let name = self.dom.insert_text(name);
-        let value = self.dom.insert_text(value);
+        let name = self.dom.insert_str(name);
+        let value = self.dom.insert_str(value);
         if let Some(attr) = self.dom.attr_buf.iter_mut().find(|[k, _]| *k == name) {
             attr[1] = value;
         } else {
@@ -508,17 +616,17 @@ mod tests {
         // add and update some attrs
         {
             let mut root = dom.get_element_node_mut(ROOT_NODE_INDEX).unwrap();
-            let attrs = root.insert_attribute("key", "value");
+            let attrs = root.insert_attr("key", "value");
             let attrs = root.dom.ranges.items[attrs].clone();
             let attr = root.dom.attrs[attrs][0].clone();
-            assert_eq!("key", root.dom.get_text(attr[0]).unwrap());
-            assert_eq!("value", root.dom.get_text(attr[1]).unwrap());
+            assert_eq!("key", root.dom.get_str(attr[0]).unwrap());
+            assert_eq!("value", root.dom.get_str(attr[1]).unwrap());
 
-            let attrs = root.insert_attribute("key", "new");
+            let attrs = root.insert_attr("key", "new");
             let attrs = root.dom.ranges.items[attrs].clone();
             let attr = root.dom.attrs[attrs][0].clone();
-            assert_eq!("key", root.dom.get_text(attr[0]).unwrap());
-            assert_eq!("new", root.dom.get_text(attr[1]).unwrap());
+            assert_eq!("key", root.dom.get_str(attr[0]).unwrap());
+            assert_eq!("new", root.dom.get_str(attr[1]).unwrap());
         }
         assert_eq!("keyvaluenew".as_bytes(), dom.text.items);
 
@@ -532,22 +640,22 @@ mod tests {
     #[test]
     fn append_child() {
         let mut dom = Dom::new();
-        let name = dom.insert_text("span");
-        let id = dom.insert_text("id");
-        let foo = dom.insert_text("foo");
+        let name = dom.insert_str("span");
+        let id = dom.insert_str("id");
+        let foo = dom.insert_str("foo");
         let index = dom
             .get_element_node_mut(ROOT_NODE_INDEX)
-            .map(|mut root| root.append_child_element(name, &[[id, foo]]))
+            .map(|mut root| root.append_child_element_old(name, &[[id, foo]]))
             .unwrap();
         assert_eq!(1, index);
 
         {
             let mut child = dom.get_element_node_mut(index).unwrap();
-            let attrs = child.insert_attribute("key", "value");
+            let attrs = child.insert_attr("key", "value");
             let attrs = child.dom.ranges.items[attrs].clone();
             let attr = child.dom.attrs[attrs][1].clone();
-            assert_eq!("key", child.dom.get_text(attr[0]).unwrap());
-            assert_eq!("value", child.dom.get_text(attr[1]).unwrap());
+            assert_eq!("key", child.dom.get_str(attr[0]).unwrap());
+            assert_eq!("value", child.dom.get_str(attr[1]).unwrap());
         }
 
         assert_eq!(

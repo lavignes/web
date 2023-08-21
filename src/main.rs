@@ -1,5 +1,3 @@
-#![feature(poll_ready)]
-
 // use std::{
 //     io::{self, Write},
 //     time::Duration,
@@ -7,12 +5,38 @@
 
 // use minifb::{Window, WindowOptions};
 
+use std::{future, path::PathBuf, pin::Pin};
+
+use clap::Parser;
+use dom::Dom;
+use io::AsyncStrReader;
+use smol::fs::File;
+
+mod asyncro;
 mod dom;
 mod html;
 mod io;
+mod tls;
+mod uri;
 
-fn main() {
-    smol::block_on(async {});
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// An optional document location
+    location: Option<PathBuf>, // TODO: Uri
+}
+
+fn main() -> std::io::Result<()> {
+    let args = Args::parse();
+    let mut dom = Dom::new();
+    smol::block_on(async {
+        let file = File::open(args.location.unwrap()).await?;
+        let reader = AsyncStrReader::new(file);
+        let mut parser = html::Parser::new(reader);
+        future::poll_fn(|cx| Pin::new(&mut parser).poll_next(cx, &mut dom)).await;
+        dom.write_tree(&mut std::io::stdout())?;
+        Ok(())
+    })
     //    let mut win = Window::new(
     //        "web",
     //        800,

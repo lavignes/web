@@ -37,13 +37,12 @@ pub enum Token {
     },
     EndTag {
         name: usize,
-        attrs: usize,
     },
     DocType,
     Comment,
 }
 
-enum State {
+pub enum State {
     Data,
 
     TagOpen,
@@ -60,6 +59,10 @@ enum State {
     AfterAttributeValueQuoted,
 
     BogusComment,
+    RcData,
+    RcDataLessThan,
+    RcDataEndTagOpen,
+    RcDataEndTagName,
 }
 
 pub trait Interner {
@@ -73,7 +76,8 @@ struct TokenizerInner {
     state: State,
     str_buf: String,
     attr_buf: Vec<[usize; 2]>,
-    temp_buffer: String,
+    temp_buffer: Vec<(Location, char)>,
+    last_start_tag_emitted_name: Option<usize>,
     synthetic_toks: Vec<(Location, Token)>,
     force_eof: bool,
     tok: Token,
@@ -96,7 +100,8 @@ impl<R> Tokenizer<R> {
             state: State::Data,
             str_buf: String::new(),
             attr_buf: Vec::new(),
-            temp_buffer: String::new(),
+            temp_buffer: Vec::new(),
+            last_start_tag_emitted_name: None,
             synthetic_toks: Vec::new(),
             force_eof: false,
             tok: Token::Comment,
@@ -104,6 +109,10 @@ impl<R> Tokenizer<R> {
             loc: Location { line: 1, column: 0 },
         };
         Self { reader, inner }
+    }
+
+    pub fn set_state(&mut self, state: State) {
+        self.inner.state = state;
     }
 }
 
@@ -132,9 +141,9 @@ impl TokenizerInner {
                     self_closing,
                 }
             }
-            Token::EndTag { name, attrs } if name == I::EMPTY_RANGE_INDEX => {
+            Token::EndTag { name } if name == I::EMPTY_RANGE_INDEX => {
                 let name = int.intern_str(&self.str_buf);
-                Token::EndTag { name, attrs }
+                Token::EndTag { name }
             }
             tok => tok,
         }
@@ -153,10 +162,6 @@ impl TokenizerInner {
                     attrs,
                     self_closing,
                 }
-            }
-            Token::EndTag { name, attrs } if attrs == I::EMPTY_RANGE_INDEX => {
-                let attrs = int.intern_attrs(&self.attr_buf);
-                Token::EndTag { name, attrs }
             }
             tok => tok,
         }
@@ -178,6 +183,8 @@ impl TokenizerInner {
     }
 
     fn next<I: Interner>(&mut self, input: &str, int: &mut I) -> Poll<Option<TokenzizerItem>> {
+        // TODO: try changing the code to match the parser. we dont need to project and
+        //   have an inner field that we split out.
         let mut chars = input.chars().newline_normalized().peekable();
         loop {
             let c = chars.peek().map(|(_, c)| *c);
@@ -238,7 +245,6 @@ impl TokenizerInner {
                         self.str_buf.clear();
                         self.tok = Token::EndTag {
                             name: I::EMPTY_RANGE_INDEX,
-                            attrs: I::EMPTY_RANGE_INDEX,
                         };
                         self.state = State::TagName;
                     }
@@ -531,19 +537,133 @@ impl TokenizerInner {
                     }
                 },
                 State::BogusComment => todo!("bogus comment"),
+                State::RcData => match c {
+                    Some('&') => todo!("char reference state"),
+                    Some('<') => {
+                        self.consume(&mut chars);
+                        self.start_loc = self.loc;
+                        self.state = State::RcDataLessThan;
+                    }
+                    Some('\x00') => {
+                        // error: unexpected-null-character
+                        self.consume(&mut chars);
+                        return self.token_here(Token::Char(char::REPLACEMENT_CHARACTER));
+                    }
+                    None => return Poll::Ready(None),
+                    Some(c) => {
+                        self.consume(&mut chars);
+                        return self.token_here(Token::Char(c));
+                    }
+                },
+                State::RcDataLessThan => match c {
+                    Some('/') => {
+                        self.consume(&mut chars);
+                        self.temp_buffer.clear();
+                        self.state = State::RcDataEndTagOpen;
+                    }
+                    _ => {
+                        self.state = State::RcData;
+                        return self.token(self.start_loc, Token::Char('<'));
+                    }
+                },
+                State::RcDataEndTagOpen => match c {
+                    Some(c) if c.is_alphabetic() => {
+                        self.str_buf.clear();
+                        self.tok = Token::EndTag {
+                            name: I::EMPTY_RANGE_INDEX,
+                        };
+                        self.state = State::RcDataEndTagName;
+                    }
+                    _ => {
+                        self.synthetic_toks.push((self.loc, Token::Char('/')));
+                        self.state = State::RcData;
+                        return self.token(self.start_loc, Token::Char('<'));
+                    }
+                },
+                State::RcDataEndTagName => match c {
+                    Some('\t' | '\n' | '\x0C' | ' ') => {
+                        self.set_tag_name_if_unset(int);
+                        if let Token::EndTag { name } = self.tok {
+                            if matches!(self.last_start_tag_emitted_name, Some(n) if n == name) {
+                                self.consume(&mut chars);
+                                self.state = State::BeforeAttributeName;
+                                return Poll::Pending;
+                            }
+                        }
+                        for (loc, c) in self.temp_buffer.drain(..).rev() {
+                            self.synthetic_toks.push((loc, Token::Char(c)));
+                        }
+                        self.synthetic_toks.push((self.loc, Token::Char('/')));
+                        self.state = State::RcData;
+                        return self.token(self.start_loc, Token::Char('<'));
+                    }
+                    Some('/') => {
+                        self.set_tag_name_if_unset(int);
+                        if let Token::EndTag { name } = self.tok {
+                            if matches!(self.last_start_tag_emitted_name, Some(n) if n == name) {
+                                self.consume(&mut chars);
+                                self.state = State::SelfClosingStartTag;
+                                return Poll::Pending;
+                            }
+                        }
+                        for (loc, c) in self.temp_buffer.drain(..).rev() {
+                            self.synthetic_toks.push((loc, Token::Char(c)));
+                        }
+                        self.synthetic_toks.push((self.loc, Token::Char('/')));
+                        self.state = State::RcData;
+                        return self.token(self.start_loc, Token::Char('<'));
+                    }
+                    Some('>') => {
+                        self.set_tag_name_if_unset(int);
+                        if let Token::EndTag { name } = self.tok {
+                            if matches!(self.last_start_tag_emitted_name, Some(n) if n == name) {
+                                self.consume(&mut chars);
+                                self.state = State::Data;
+                                return self.token(self.start_loc, self.tok);
+                            }
+                        }
+                        for (loc, c) in self.temp_buffer.drain(..).rev() {
+                            self.synthetic_toks.push((loc, Token::Char(c)));
+                        }
+                        self.synthetic_toks.push((self.loc, Token::Char('/')));
+                        self.state = State::RcData;
+                        return self.token(self.start_loc, Token::Char('<'));
+                    }
+                    Some(c) if c.is_ascii_uppercase() => {
+                        self.consume(&mut chars);
+                        self.str_buf.push(c.to_ascii_lowercase());
+                        self.temp_buffer.push((self.loc, c));
+                    }
+                    Some(c) if c.is_ascii_lowercase() => {
+                        self.consume(&mut chars);
+                        self.str_buf.push(c);
+                        self.temp_buffer.push((self.loc, c));
+                    }
+                    _ => {
+                        for (loc, c) in self.temp_buffer.drain(..).rev() {
+                            self.synthetic_toks.push((loc, Token::Char(c)));
+                        }
+                        self.synthetic_toks.push((self.loc, Token::Char('/')));
+                        self.state = State::RcData;
+                        return self.token(self.start_loc, Token::Char('<'));
+                    }
+                },
             }
         }
     }
 }
 
 impl<R: AsyncRead + Unpin> Tokenizer<R> {
-    fn poll_next<I: Interner>(
+    pub fn poll_next<I: Interner>(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         int: &mut I,
     ) -> Poll<Option<TokenzizerItem>> {
         let mut this = self.project();
         if let Some((loc, tok)) = this.inner.synthetic_toks.pop() {
+            if let Token::StartTag { name, .. } = tok {
+                this.inner.last_start_tag_emitted_name = Some(name);
+            }
             return Poll::Ready(Some((loc, Ok(tok))));
         }
         if this.inner.force_eof {
@@ -564,6 +684,9 @@ impl<R: AsyncRead + Unpin> Tokenizer<R> {
         };
         match this.inner.next(input, int) {
             Poll::Ready(item) => {
+                if let Some((_, Ok(Token::StartTag { name, .. }))) = item {
+                    this.inner.last_start_tag_emitted_name = Some(name);
+                }
                 this.reader.consume(this.inner.consumed);
                 this.inner.consumed = 0;
                 Poll::Ready(item)
@@ -583,10 +706,10 @@ mod tests {
     use smol::io::Cursor;
 
     use super::*;
-    use crate::io;
+    use crate::asyncro;
 
     fn cx<'a>() -> Context<'a> {
-        Context::from_waker(io::noop_waker_ref())
+        Context::from_waker(asyncro::noop_waker_ref())
     }
 
     struct MockInterner {
@@ -724,10 +847,7 @@ mod tests {
             &mut tok,
             &mut int,
             [1, 1],
-            Token::EndTag {
-                name: 1,
-                attrs: MockInterner::EMPTY_RANGE_INDEX,
-            },
+            Token::EndTag { name: 1 },
         );
         assert_none(&mut cx, &mut tok, &mut int);
         assert_str(&mut int, "hello", 1);

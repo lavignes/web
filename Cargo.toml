@@ -17,6 +17,7 @@ incremental = false
 [dependencies]
 thiserror = "1"
 pin-project = "1"
+clap = { version = "4", features = ["derive"] }
 smol = "1"
 
 minifb = { version = "0.25", optional = true }
